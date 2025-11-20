@@ -1,0 +1,9 @@
+[package]
+name = "vidtu"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.100"
+ffmpeg-next = "8.0.0"
+ratatui = "0.29.0"
