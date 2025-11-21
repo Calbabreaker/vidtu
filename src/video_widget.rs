@@ -1,48 +1,76 @@
-use crate::{app::State, decoder::VideoDecoder};
+use crate::{app::Action, audio_player::AudioPlayer, decoder::VideoDecoder};
+use ffmpeg_next as ffmpeg;
 use ratatui::{prelude::*, widgets::*};
 
 pub struct VideoWidget {
-    decoder: VideoDecoder,
-    next_frame: ffmpeg_next::util::frame::Video,
+    video_decoder: Option<VideoDecoder>,
+    next_frame: Option<ffmpeg::frame::Video>,
     filepath: std::path::PathBuf,
+    audio_player: AudioPlayer,
+    resume_time: std::time::Instant,
+    pause_time: std::time::Instant,
 }
 
 impl VideoWidget {
     pub fn new(filepath: std::path::PathBuf) -> anyhow::Result<Self> {
         Ok(Self {
-            decoder: VideoDecoder::from_file(&filepath)?,
-            next_frame: ffmpeg_next::util::frame::Video::empty(),
+            audio_player: AudioPlayer::new(&filepath)?,
+            video_decoder: VideoDecoder::from_file(&filepath).ok(),
+            next_frame: None,
+            resume_time: std::time::Instant::now(),
+            pause_time: std::time::Instant::now(),
             filepath,
         })
     }
 
-    pub fn update(&mut self) -> anyhow::Result<State> {
-        let last_frame_timestap = self.decoder.frame_timestamp(&self.next_frame);
-        self.next_frame = self.decoder.next_frame()?;
-        let timestamp = self.decoder.frame_timestamp(&self.next_frame);
-
-        Ok(State::WaitForFrame(timestamp - last_frame_timestap))
+    pub fn update(&mut self) -> anyhow::Result<()> {
+        if let Some(decoder) = self.video_decoder.as_mut() {
+            self.next_frame = Some(decoder.next_frame()?);
+        };
+        Ok(())
     }
 
-    pub fn resize(&mut self, width: u16, height: u16) -> anyhow::Result<()> {
-        self.decoder.set_output_size(width as u32, height as u32)
+    pub fn wait_time(&self) -> Option<std::time::Duration> {
+        let now = std::time::Instant::now();
+        let decoder = self.video_decoder.as_ref()?;
+        let next_frame = self.next_frame.as_ref()?;
+        decoder
+            .common
+            .timestamp(next_frame.pts())
+            .checked_sub(now - self.resume_time)
+    }
+
+    pub fn action(&mut self, action: Action) -> anyhow::Result<()> {
+        match action {
+            Action::Resize(width, height) => {
+                if let Some(decoder) = self.video_decoder.as_mut() {
+                    decoder.set_output_size(width as u32, height as u32)?;
+                }
+            }
+            Action::Resume => self.resume_time += std::time::Instant::now() - self.pause_time,
+            Action::Pause => self.pause_time = std::time::Instant::now(),
+        }
+        self.audio_player.action(action);
+        Ok(())
     }
 }
 
 impl Widget for &VideoWidget {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let frame = &self.next_frame;
-
         let filename = self
             .filepath
             .file_name()
             .unwrap_or_default()
             .to_string_lossy();
-        let total_duration = self.decoder.total_duration().as_secs();
-        let current_secs = self.decoder.frame_timestamp(frame).as_secs();
-        let block = Block::bordered()
-            .title(Line::from(filename).centered())
-            .title_bottom(Line::from(format!(
+
+        let mut block = Block::bordered().title(Line::from(filename).centered());
+
+        if let Some(frame) = self.next_frame.as_ref()
+            && let Some(decoder) = self.video_decoder.as_ref()
+        {
+            let total_duration = decoder.common.total_duration().as_secs();
+            let current_secs = decoder.common.timestamp(frame.pts()).as_secs();
+            block = block.title_bottom(Line::from(format!(
                 "{:0>2}:{:0>2} / {:0>2}:{:0>2}",
                 current_secs / 60,
                 current_secs % 60,
@@ -50,11 +78,12 @@ impl Widget for &VideoWidget {
                 total_duration % 60,
             )));
 
-        for y in 0..area.height as usize {
-            for x in 0..area.width as usize {
-                if let Some(luma) = frame.data(0).get(y * frame.stride(0) + x) {
-                    let pos = Position::new(x as u16 + area.x, y as u16 + area.y);
-                    buf[pos].set_char(get_char(*luma));
+            for y in 0..area.height as usize {
+                for x in 0..area.width as usize {
+                    if let Some(luma) = frame.data(0).get(y * frame.stride(0) + x) {
+                        let pos = Position::new(x as u16 + area.x, y as u16 + area.y);
+                        buf[pos].set_char(get_char(*luma));
+                    }
                 }
             }
         }
