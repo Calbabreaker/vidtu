@@ -8,3 +8,7 @@ anyhow = "1.0.100"
 cpal = "0.16.0"
 ffmpeg-next = "8.0.0"
 ratatui = "0.29.0"
+
+[profile.release-debug]
+inherits = "release"
+debug = true

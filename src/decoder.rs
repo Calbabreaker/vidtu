@@ -58,10 +58,6 @@ impl DecoderCommon {
     }
 }
 
-struct VideoFrame {
-    pub frame: ffmpeg::frame::Video,
-}
-
 pub struct VideoDecoder {
     decoder: ffmpeg::decoder::Video,
     scaler: Option<ffmpeg::software::scaling::Context>,
@@ -83,7 +79,7 @@ impl VideoDecoder {
             self.decoder.format(),
             self.decoder.width(),
             self.decoder.height(),
-            self.decoder.format(),
+            ffmpeg::format::Pixel::RGB24,
             width,
             height,
             ffmpeg::software::scaling::Flags::BILINEAR,

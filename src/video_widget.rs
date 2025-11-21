@@ -1,6 +1,6 @@
 use crate::{app::Action, audio_player::AudioPlayer, decoder::VideoDecoder};
 use ffmpeg_next as ffmpeg;
-use ratatui::{prelude::*, widgets::*};
+use ratatui::{prelude::*, style::Styled, widgets::*};
 
 pub struct VideoWidget {
     video_decoder: Option<VideoDecoder>,
@@ -63,7 +63,9 @@ impl Widget for &VideoWidget {
             .unwrap_or_default()
             .to_string_lossy();
 
-        let mut block = Block::bordered().title(Line::from(filename).centered());
+        let mut block = Block::bordered()
+            .title(Line::from(filename).centered())
+            .set_style(Color::Black);
 
         if let Some(frame) = self.next_frame.as_ref()
             && let Some(decoder) = self.video_decoder.as_ref()
@@ -80,9 +82,12 @@ impl Widget for &VideoWidget {
 
             for y in 0..area.height as usize {
                 for x in 0..area.width as usize {
-                    if let Some(luma) = frame.data(0).get(y * frame.stride(0) + x) {
-                        let pos = Position::new(x as u16 + area.x, y as u16 + area.y);
-                        buf[pos].set_char(get_char(*luma));
+                    let pos = Position::new(x as u16 + area.x, y as u16 + area.y);
+                    if let Some(row) = frame.data(0).get(y * frame.stride(0)..)
+                        && let Some(rgb) = row.as_chunks::<3>().0.get(x)
+                    {
+                        let color = Color::Rgb(rgb[0], rgb[1], rgb[2]);
+                        buf[pos].set_char(' ').set_bg(color);
                     }
                 }
             }
