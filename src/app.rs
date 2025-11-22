@@ -54,8 +54,8 @@ impl App {
     }
 
     fn handle_events(&mut self) -> anyhow::Result<()> {
-        let timestamp = self.video_widget.frame_timestamp();
         if self.state == State::Playing {
+            let timestamp = self.video_widget.frame_timestamp();
             let wait_time = timestamp
                 .checked_sub(self.video_widget.real_timestamp())
                 .unwrap_or_default()
@@ -65,6 +65,7 @@ impl App {
             }
         }
 
+        let timestamp = self.video_widget.real_timestamp();
         match ratatui::crossterm::event::read()? {
             Event::Key(event) if event.kind == KeyEventKind::Press => match event.code {
                 KeyCode::Char('q') => self.state = State::Exited,
