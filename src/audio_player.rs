@@ -1,26 +1,25 @@
-use std::fs::File;
-use std::io::Write;
-
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ffmpeg_next as ffmpeg;
 
 use crate::{app::Action, decoder::AudioDecoder};
 
 pub struct AudioPlayer {
-    audio_stream: Option<cpal::Stream>,
+    _audio_stream: Option<cpal::Stream>,
     action_tx: std::sync::mpsc::Sender<Action>,
+    total_duration: std::time::Duration,
 }
 
 impl AudioPlayer {
     pub fn new(filepath: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
         let audio_decoder = AudioDecoder::from_file(&filepath);
-        let mut audio_stream = None;
-
+        let mut total_duration = std::time::Duration::ZERO;
         let (action_tx, action_rx) = std::sync::mpsc::channel();
 
+        let mut audio_stream = None;
         if let Ok(mut audio_decoder) = audio_decoder
             && let Some(device) = cpal::default_host().default_output_device()
         {
+            total_duration = audio_decoder.common.total_duration();
             let config = device.default_output_config()?;
             audio_decoder.set_output_format(
                 cpal_format_to_ffmpeg(config.sample_format())
@@ -42,13 +41,18 @@ impl AudioPlayer {
         }
 
         Ok(Self {
-            audio_stream,
+            _audio_stream: audio_stream,
+            total_duration,
             action_tx,
         })
     }
 
     pub fn action(&mut self, action: Action) {
         self.action_tx.send(action).unwrap();
+    }
+
+    pub fn total_duration(&self) -> std::time::Duration {
+        self.total_duration
     }
 }
 
@@ -61,9 +65,9 @@ struct StreamState {
 }
 
 impl StreamState {
-    fn new(mut audio_decoder: AudioDecoder, action_rx: std::sync::mpsc::Receiver<Action>) -> Self {
+    fn new(audio_decoder: AudioDecoder, action_rx: std::sync::mpsc::Receiver<Action>) -> Self {
         Self {
-            current_frame: audio_decoder.next_frame().ok(),
+            current_frame: None,
             audio_decoder,
             frame_data_index: 0,
             action_rx,
@@ -75,7 +79,14 @@ impl StreamState {
         while let Ok(action) = self.action_rx.try_recv() {
             match action {
                 Action::Pause => self.paused = true,
-                Action::Resume => self.paused = false,
+                Action::Resume => {
+                    self.paused = false;
+                }
+                Action::Seek(timestamp) => {
+                    self.audio_decoder.common.seek(timestamp).ok();
+                    self.audio_decoder.decoder.flush();
+                    self.paused = false;
+                }
                 _ => (),
             }
         }
@@ -88,10 +99,17 @@ impl StreamState {
         }
 
         for out_byte in out {
-            let Some(ref frame) = self.current_frame else {
-                return;
-            };
+            if self.current_frame.is_none() {
+                if let Ok(frame) = self.audio_decoder.next_frame() {
+                    self.current_frame = Some(frame);
+                } else {
+                    self.paused = true;
+                }
+            }
 
+            let Some(frame) = self.current_frame.as_ref() else {
+                break;
+            };
             *out_byte = frame.data(0)[self.frame_data_index];
             self.frame_data_index += 1;
 
@@ -102,7 +120,7 @@ impl StreamState {
                 false,
             );
             if self.frame_data_index >= frame_size {
-                self.current_frame = self.audio_decoder.next_frame().ok();
+                self.current_frame = None;
                 self.frame_data_index = 0;
             };
         }

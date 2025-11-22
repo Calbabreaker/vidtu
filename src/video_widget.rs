@@ -1,14 +1,14 @@
 use crate::{app::Action, audio_player::AudioPlayer, decoder::VideoDecoder};
 use ffmpeg_next as ffmpeg;
-use ratatui::{prelude::*, style::Styled, widgets::*};
+use ratatui::{prelude::*, widgets::*};
 
 pub struct VideoWidget {
-    video_decoder: Option<VideoDecoder>,
+    pub video_decoder: Option<VideoDecoder>,
     next_frame: Option<ffmpeg::frame::Video>,
     filepath: std::path::PathBuf,
     audio_player: AudioPlayer,
     resume_time: std::time::Instant,
-    pause_time: std::time::Instant,
+    resume_frame_timestamp: std::time::Duration,
 }
 
 impl VideoWidget {
@@ -18,26 +18,40 @@ impl VideoWidget {
             video_decoder: VideoDecoder::from_file(&filepath).ok(),
             next_frame: None,
             resume_time: std::time::Instant::now(),
-            pause_time: std::time::Instant::now(),
+            resume_frame_timestamp: std::time::Duration::ZERO,
             filepath,
         })
     }
 
     pub fn update(&mut self) -> anyhow::Result<()> {
+        let real_timestamp = self.real_timestamp();
         if let Some(decoder) = self.video_decoder.as_mut() {
+            decoder.common.real_timestamp = real_timestamp;
             self.next_frame = Some(decoder.next_frame()?);
         };
         Ok(())
     }
 
-    pub fn wait_time(&self) -> Option<std::time::Duration> {
-        let now = std::time::Instant::now();
-        let decoder = self.video_decoder.as_ref()?;
-        let next_frame = self.next_frame.as_ref()?;
-        decoder
-            .common
-            .timestamp(next_frame.pts())
-            .checked_sub(now - self.resume_time)
+    /// Get the current video timestamp on where it should be based on the real time
+    pub fn real_timestamp(&self) -> std::time::Duration {
+        std::time::Instant::now() - self.resume_time + self.resume_frame_timestamp
+    }
+
+    pub fn frame_timestamp(&self) -> std::time::Duration {
+        if let Some(decoder) = self.video_decoder.as_ref()
+            && let Some(next_frame) = self.next_frame.as_ref()
+        {
+            decoder.common.timestamp(next_frame.pts())
+        } else {
+            self.real_timestamp()
+        }
+    }
+
+    pub fn total_duration(&self) -> std::time::Duration {
+        self.video_decoder
+            .as_ref()
+            .map(|d| d.common.total_duration())
+            .unwrap_or(self.audio_player.total_duration())
     }
 
     pub fn action(&mut self, action: Action) -> anyhow::Result<()> {
@@ -47,8 +61,19 @@ impl VideoWidget {
                     decoder.set_output_size(width as u32, height as u32)?;
                 }
             }
-            Action::Resume => self.resume_time += std::time::Instant::now() - self.pause_time,
-            Action::Pause => self.pause_time = std::time::Instant::now(),
+            Action::Resume => {
+                self.resume_time = std::time::Instant::now();
+                self.resume_frame_timestamp = self.frame_timestamp();
+            }
+            Action::Seek(timestamp) => {
+                if let Some(decoder) = self.video_decoder.as_mut() {
+                    decoder.common.seek(timestamp)?;
+                    decoder.decoder.flush();
+                }
+                self.resume_time = std::time::Instant::now();
+                self.resume_frame_timestamp = timestamp;
+            }
+            _ => (),
         }
         self.audio_player.action(action);
         Ok(())
@@ -62,24 +87,31 @@ impl Widget for &VideoWidget {
             .file_name()
             .unwrap_or_default()
             .to_string_lossy();
+        let total_duration = self.total_duration().as_secs();
+        let current_secs = self.frame_timestamp().as_secs();
 
-        let mut block = Block::bordered()
+        let block = Block::bordered()
             .title(Line::from(filename).centered())
-            .set_style(Color::Black);
-
-        if let Some(frame) = self.next_frame.as_ref()
-            && let Some(decoder) = self.video_decoder.as_ref()
-        {
-            let total_duration = decoder.common.total_duration().as_secs();
-            let current_secs = decoder.common.timestamp(frame.pts()).as_secs();
-            block = block.title_bottom(Line::from(format!(
+            .title_bottom(Line::from(format!(
                 "{:0>2}:{:0>2} / {:0>2}:{:0>2}",
                 current_secs / 60,
                 current_secs % 60,
                 total_duration / 60,
                 total_duration % 60,
-            )));
+            )))
+            .title_bottom(
+                Line::from(vec![
+                    " Pause ".into(),
+                    "<K>".blue().bold(),
+                    " Seek backwards ".into(),
+                    "<J>".blue().bold(),
+                    " Seek forwards ".into(),
+                    "<L> ".blue().bold(),
+                ])
+                .right_aligned(),
+            );
 
+        if let Some(frame) = self.next_frame.as_ref() {
             for y in 0..area.height as usize {
                 for x in 0..area.width as usize {
                     let pos = Position::new(x as u16 + area.x, y as u16 + area.y);
@@ -97,8 +129,8 @@ impl Widget for &VideoWidget {
     }
 }
 
-fn get_char(brightness: u8) -> char {
-    let levels = [' ', '.', '\'', ':', '-', '*', '%', '#'];
-    let normalized = brightness as f32 / u8::MAX as f32;
-    levels[(normalized * levels.len() as f32) as usize]
-}
+// fn get_char(brightness: u8) -> char {
+//     let levels = [' ', '.', '\'', ':', '-', '*', '%', '#'];
+//     let normalized = brightness as f32 / u8::MAX as f32;
+//     levels[(normalized * levels.len() as f32) as usize]
+// }

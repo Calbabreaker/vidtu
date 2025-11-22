@@ -3,6 +3,7 @@ use ffmpeg_next as ffmpeg;
 pub struct DecoderCommon {
     input: ffmpeg::format::context::Input,
     stream_index: usize,
+    pub real_timestamp: std::time::Duration,
 }
 
 impl DecoderCommon {
@@ -10,6 +11,7 @@ impl DecoderCommon {
         path: impl AsRef<std::path::Path>,
         media_type: ffmpeg::media::Type,
     ) -> anyhow::Result<Self> {
+        ffmpeg::log::set_level(ffmpeg::log::Level::Quiet);
         let input = ffmpeg::format::input(&path)?;
         let stream = input
             .streams()
@@ -18,6 +20,7 @@ impl DecoderCommon {
         Ok(Self {
             stream_index: stream.index(),
             input,
+            real_timestamp: std::time::Duration::ZERO,
         })
     }
 
@@ -31,10 +34,13 @@ impl DecoderCommon {
         frame_out: &mut ffmpeg::Frame,
         decoder: &mut ffmpeg::decoder::Opened,
     ) -> anyhow::Result<()> {
+        let timestamp_pts = (self.real_timestamp.as_secs_f64() / self.timebase()) as i64;
         while let Some((stream, packet)) = self.input.packets().next() {
             if stream.index() == self.stream_index {
                 decoder.send_packet(&packet)?;
-                if decoder.receive_frame(frame_out).is_ok() {
+                if decoder.receive_frame(frame_out).is_ok()
+                    && frame_out.pts().unwrap_or_default() > timestamp_pts
+                {
                     return Ok(());
                 }
             }
@@ -51,15 +57,37 @@ impl DecoderCommon {
         )
     }
 
-    pub fn timestamp(&self, pts: Option<i64>) -> std::time::Duration {
+    fn timebase(&self) -> f64 {
         let stream = self.input.stream(self.stream_index).unwrap();
-        let time_base: f64 = stream.time_base().into();
-        std::time::Duration::from_secs_f64(pts.unwrap_or_default() as f64 * time_base)
+        stream.time_base().into()
+    }
+
+    pub fn timestamp(&self, pts: Option<i64>) -> std::time::Duration {
+        std::time::Duration::from_secs_f64(pts.unwrap_or_default() as f64 * self.timebase())
+    }
+
+    pub fn seek(&mut self, timestamp: std::time::Duration) -> anyhow::Result<()> {
+        self.real_timestamp = timestamp;
+        unsafe {
+            // ffmpeg::format::Input::seek doesn't take a stream index so we gotta call the ffi
+            // manually
+            match ffmpeg::ffi::avformat_seek_file(
+                self.input.as_mut_ptr(),
+                self.stream_index as i32,
+                i64::MIN,
+                (timestamp.as_secs_f64() / self.timebase()) as i64,
+                i64::MAX,
+                ffmpeg::ffi::AVSEEK_FLAG_BACKWARD,
+            ) {
+                s if s >= 0 => Ok(()),
+                e => Err(ffmpeg::Error::from(e))?,
+            }
+        }
     }
 }
 
 pub struct VideoDecoder {
-    decoder: ffmpeg::decoder::Video,
+    pub decoder: ffmpeg::decoder::Video,
     scaler: Option<ffmpeg::software::scaling::Context>,
     pub common: DecoderCommon,
 }
@@ -87,21 +115,20 @@ impl VideoDecoder {
         Ok(())
     }
 
+    /// Get the next video frame while discarding all packets that are before common.real_timestamp
     pub fn next_frame(&mut self) -> anyhow::Result<ffmpeg::frame::Video> {
         let mut frame = ffmpeg::frame::Video::empty();
         self.common.next_raw_frame(&mut frame, &mut self.decoder)?;
-        if let Some(scaler) = self.scaler.as_mut() {
-            let mut scaled_frame = ffmpeg::frame::Video::empty();
-            scaler.run(&frame, &mut scaled_frame)?;
-            scaled_frame.set_pts(frame.pts());
-            frame = scaled_frame
-        }
-        Ok(frame)
+        let scaler = self.scaler.as_mut().unwrap();
+        let mut scaled_frame = ffmpeg::frame::Video::empty();
+        scaler.run(&frame, &mut scaled_frame)?;
+        scaled_frame.set_pts(frame.pts());
+        Ok(scaled_frame)
     }
 }
 
 pub struct AudioDecoder {
-    decoder: ffmpeg::decoder::Audio,
+    pub decoder: ffmpeg::decoder::Audio,
     resampler: Option<ffmpeg::software::resampling::Context>,
     pub common: DecoderCommon,
 }
@@ -143,6 +170,7 @@ impl AudioDecoder {
         let mut resampled = ffmpeg::frame::Audio::empty();
         let resampler = self.resampler.as_mut().unwrap();
         resampler.run(&frame, &mut resampled)?;
+        resampled.set_pts(frame.pts());
         Ok(resampled)
     }
 }
