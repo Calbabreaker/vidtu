@@ -84,6 +84,16 @@ impl DecoderCommon {
             }
         }
     }
+
+    pub fn frame_rate(&self) -> u32 {
+        f64::from(
+            self.input
+                .stream(self.stream_index)
+                .unwrap()
+                .avg_frame_rate()
+                .reduce(),
+        ) as u32
+    }
 }
 
 pub struct VideoDecoder {

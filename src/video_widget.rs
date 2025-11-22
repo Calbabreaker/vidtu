@@ -90,8 +90,18 @@ impl Widget for &VideoWidget {
         let total_duration = self.total_duration().as_secs();
         let current_secs = self.frame_timestamp().as_secs();
 
+        let video_info = self.video_decoder.as_ref().map(|d| {
+            format!(
+                "{} fps {}x{}",
+                d.common.frame_rate(),
+                d.decoder.width(),
+                d.decoder.height(),
+            )
+        });
+
         let block = Block::bordered()
-            .title(Line::from(filename).centered())
+            .title_top(Line::from(filename).centered())
+            .title_top(Line::from(video_info.unwrap_or_default()))
             .title_bottom(Line::from(format!(
                 "{:0>2}:{:0>2} / {:0>2}:{:0>2}",
                 current_secs / 60,
